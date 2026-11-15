@@ -4,6 +4,10 @@
   :url "http://www.intermine.org"
   :dependencies [; Clojure
                  [org.clojure/clojure "1.10.1"]
+                 ;; Not required by any source file. Lein-only conflict pin: without it lein
+                 ;; resolves tools.reader 0.10.0 (via timbre -> encore), which breaks loading
+                 ;; clojure.tools.reader.edn. deps.edn picks the newest version by itself, so it
+                 ;; was removed there. Delete this line together with project.clj.
                  [org.clojure/tools.reader "1.3.4"]
 
                  ; HTTP
