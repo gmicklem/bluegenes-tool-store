@@ -6,6 +6,7 @@
             [taoensso.timbre :as timbre :refer [error infof errorf warnf]]
             [bluegenes-tool-store.package :as pkg]
             [clojure.edn :as edn]
+            [clojure.string :as string]
             [clj-http.client :as client])
   (:import [java.util.concurrent.locks ReentrantLock]))
 
@@ -17,19 +18,42 @@
   "Path to the tools config file."
   (io/file tools-path "tools.edn"))
 
+(def npm-search-url
+  "NPM registry search for packages with the bluegenes tool keyword."
+  (str "https://registry.npmjs.org/-/v1/search"
+       "?text=keywords:bluegenes-intermine-tool&size=250"))
+
+(def official-scope-prefix
+  "Only packages in this npm scope are installed automatically. The registry
+  search ignores a `scope:` qualifier, so this is enforced on the results; without
+  it anybody could publish a package with the keyword and have it installed."
+  "@intermine/")
+
+(defn parse-npm-search
+  "Parse the body of an NPM registry search response into a vector of results,
+  each a map with a `:package` (`:name`, `:version`, `:description`, ...).
+  Only official (`@intermine/`) packages are kept. Throws on a malformed body."
+  [body]
+  (let [objects (:objects (cheshire/parse-string body true))]
+    (when-not (sequential? objects)
+      (throw (ex-info "NPM search response has no `objects` list." {:body-start (some-> body (subs 0 (min 200 (count body))))})))
+    (when-not (every? #(string? (get-in % [:package :name])) objects)
+      (throw (ex-info "NPM search response contains an entry without a package name." {})))
+    (filterv #(string/starts-with? (get-in % [:package :name]) official-scope-prefix) objects)))
+
 (defn get-all-npm-tools
-  "Send an HTTP request to the NPMJS API to get a list of bluegenes tools."
+  "Send an HTTP request to the NPM registry search API to get a list of
+  bluegenes tools. On any failure, logs an error and returns an empty list."
   []
   (try
-    (-> (client/get (str "https://api.npms.io/v2/search"
-                         "?q=scope:intermine"
-                         "+keywords:bluegenes-intermine-tool"))
-        :body
-        (cheshire/parse-string true)
-        :results)
+    (let [{:keys [status body]} (client/get npm-search-url {:throw-exceptions false})]
+      (when-not (= 200 status)
+        (throw (ex-info (format "unexpected HTTP status %s" status) {:status status})))
+      (parse-npm-search body))
     (catch Exception e
-      (errorf "Failed to acquire list of bluegenes-intermine-tool from `api.npms.io`: %s"
-              (.getMessage e)))))
+      (errorf "Failed to acquire list of bluegenes-intermine-tool from the NPM registry (%s): %s"
+              npm-search-url (.getMessage e))
+      [])))
 
 (declare package-operation)
 (defn install-all-npm-tools
