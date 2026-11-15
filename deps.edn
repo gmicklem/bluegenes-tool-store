@@ -21,7 +21,7 @@
         com.fzakaria/slf4j-timbre {:mvn/version "0.3.19"}
 
         ;; Utility libraries
-        org.apache.commons/commons-compress {:mvn/version "1.19"}
+        org.apache.commons/commons-compress {:mvn/version "1.27.1"}
 
         ;; InterMine assets
         org.intermine/imcljs {:mvn/version "1.4.3"}}

@@ -26,7 +26,13 @@
                  [com.fzakaria/slf4j-timbre "0.3.19"]
 
                  ; Utility libraries
-                 [org.apache.commons/commons-compress "1.19"]
+                 [org.apache.commons/commons-compress "1.27.1"]
+                 ;; Lein-only pins: lein resolves these to the older versions pulled in by
+                 ;; clj-http (declared first), which commons-compress 1.27.1 does not support
+                 ;; (needs commons-io 2.16.1+ and commons-codec 1.17.1+). deps.edn picks the
+                 ;; newest versions by itself. Delete these lines together with project.clj.
+                 [commons-io "2.16.1"]
+                 [commons-codec "1.17.1"]
 
                  ; Intermine Assets
                  [org.intermine/imcljs "1.4.3"]]
