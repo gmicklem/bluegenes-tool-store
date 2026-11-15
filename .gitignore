@@ -10,3 +10,4 @@ node_modules/
 /.nrepl-port
 /.clj-kondo/
 /.lein-env
+/.cpcache/

@@ -2,6 +2,18 @@
 
 # BlueGenes Tool Store
 
+## Building with the Clojure CLI (deps.edn + tools.build)
+
+The Clojure CLI is the preferred build tool; `project.clj` is kept for now so both work.
+Keep the dependency lists in `deps.edn` and `project.clj` in sync.
+
+    clojure -M:test                  # run the tests
+    clojure -M -m bluegenes-tool-store.core   # start the server (add :dev or :prod aliases for local config)
+    clojure -T:build jar             # target/bluegenes-tool-store-<version>.jar (+ pom), no AOT
+    clojure -T:build install         # install the jar into ~/.m2
+    clojure -T:build uber            # target/bluegenes-tool-store.jar, standalone server
+    clojure -M -m bluegenes-tool-store.tools help   # tools CLI (replaces `lein tools`)
+
 ## Development server
 
     lein dev
