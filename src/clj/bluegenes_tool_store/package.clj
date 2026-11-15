@@ -30,6 +30,21 @@
   (when-let [entry (.getNextTarEntry tin)]
     (cons entry (lazy-seq (tar-entries tin)))))
 
+(defn- safe-entry-file
+  "Returns the file for `entry-path` inside `package-dir`. Throws if the
+  canonical destination is not strictly inside `package-dir`, which stops
+  archives with `../` or absolute entry names from writing elsewhere
+  (zip-slip)."
+  [package-dir entry-path]
+  (let [base (.toPath (.getCanonicalFile (io/file package-dir)))
+        dest (io/file package-dir entry-path)]
+    (when-not (and (.startsWith (.toPath (.getCanonicalFile dest)) base)
+                   (not= (.toPath (.getCanonicalFile dest)) base))
+      (throw (ex-info (format "Refusing to extract archive entry `%s`: it resolves outside the target directory `%s`."
+                              entry-path package-dir)
+                      {::unsafe-entry entry-path :package-dir (str package-dir)})))
+    dest))
+
 (defn- download-package-tgz
   "Downloads and decompresses a tgz file at `uri` into the folder `target`.
   Removes any leading 'package/' in the tar archive's entry paths. This is
@@ -42,12 +57,16 @@
         (doseq [^TarArchiveEntry entry (tar-entries in)
                  :when (not (.isDirectory entry))
                  :let [entry-path (string/replace-first (.getName entry) #"^package/" "")
-                       output-file (io/file package-dir entry-path)]]
+                       output-file (safe-entry-file package-dir entry-path)]]
           (io/make-parents output-file)
           (io/copy in output-file)))
       package-data
       (catch Exception e
         (error e)
+        ;; Unsafe archive: remove anything already extracted and report it as is.
+        (when (::unsafe-entry (ex-data e))
+          (delete-dir target package-dir)
+          (throw e))
         (throw
           (ex-info (format "Failed to download NPM archive `%s`. This is likely due to a network error." uri)
                    {:uri uri :name name :target target}))))))

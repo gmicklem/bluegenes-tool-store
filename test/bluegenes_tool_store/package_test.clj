@@ -38,6 +38,33 @@
              (slurp (io/file target "@scope/some-tool" "dist" "bundle.js"))))
       (is (.exists (io/file target "@scope/some-tool" "package.json"))))))
 
+(deftest download-package-tgz-zip-slip-test
+  (doseq [bad ["package/../../evil.txt" "package/sub/../../../evil.txt"]]
+    (testing (str "entry " bad " is rejected and nothing is written outside the package dir")
+      (let [dir     (temp-dir)
+            tgz     (io/file dir "pkg.tgz")
+            target  (io/file dir "tools")
+            package {:uri (str (.toURI tgz)) :name "some-tool" :version "1.0.0"}]
+        (write-tgz! tgz {"package/package.json" "{}"
+                         bad                    "pwned"})
+        (let [e (try (#'pkg/download-package-tgz package target)
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (re-find #"outside the target directory" (.getMessage e)))
+          (is (= (subs bad (count "package/"))
+                 (:bluegenes-tool-store.package/unsafe-entry (ex-data e)))))
+        (is (not (.exists (io/file dir "evil.txt"))))
+        (is (not (.exists (io/file target "evil.txt"))))
+        (is (not (.exists (io/file target "some-tool")))
+            "partial extraction is cleaned up"))))
+  (testing "safe-entry-file accepts nested paths and rejects the directory itself"
+    (let [d (temp-dir)]
+      (is (= (io/file d "a/b.js") (#'pkg/safe-entry-file d "a/b.js")))
+      (is (thrown? clojure.lang.ExceptionInfo (#'pkg/safe-entry-file d "a/../..")))
+      (is (thrown? clojure.lang.ExceptionInfo (#'pkg/safe-entry-file d ".")))
+      (is (thrown? clojure.lang.ExceptionInfo (#'pkg/safe-entry-file d "../sibling/x"))))))
+
 (deftest install-config-and-uninstall-test
   (let [dir    (temp-dir)
         config (io/file dir "tools.edn")
