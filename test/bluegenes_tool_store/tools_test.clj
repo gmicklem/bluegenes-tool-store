@@ -40,3 +40,15 @@
   (testing "GET /api/tools/path returns the configured tools path"
     (let [res (core/handler {:request-method :get :uri "/api/tools/path" :headers {}})]
       (is (= 200 (:status res))))))
+
+(deftest parse-port-test
+  (testing "config.core parses numeric env vars to Long, which must still work"
+    (is (= 5057 (core/parse-port {:server-port 5057})))
+    (is (= 8080 (core/parse-port {:port 8080}))))
+  (testing "string values from a config file work too"
+    (is (= 5057 (core/parse-port {:server-port "5057"}))))
+  (testing "server-port takes precedence over port, default is 5001"
+    (is (= 1 (core/parse-port {:server-port 1 :port 2})))
+    (is (= 5001 (core/parse-port {}))))
+  (testing "the result is an int"
+    (is (instance? Integer (core/parse-port {:server-port 5057})))))

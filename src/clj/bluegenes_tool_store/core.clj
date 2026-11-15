@@ -34,13 +34,20 @@
                  ;; into :body-params.
                  (wrap-format)))
 
+(defn parse-port
+  "Returns the server port as an int. `config.core` parses environment
+  variables as EDN, so a value such as SERVER_PORT=5001 arrives as a Long, while
+  values from a config file may be strings; accept both. Defaults to 5001."
+  [{:keys [server-port port]}]
+  (Integer/parseInt (str (or server-port port 5001))))
+
 (defn -main
   "Start the BlueGenes Tool Store server.
   This is the main entry point for the application"
   [& args]
   ;; Parse the port from the configuration file, environment variables, or default to 5001
   ;; "PORT" is often the default value for app serving platforms such as Heroku and Dokku
-  (let [port (Integer/parseInt (or (:server-port env) (:port env) "5001"))]
+  (let [port (parse-port env)]
     (timbre/set-level! :info) ; Enable Logging
     (tools/initialise-tools)
     ;; Start the Jetty server by passing in the URL routes defined in `handler`
