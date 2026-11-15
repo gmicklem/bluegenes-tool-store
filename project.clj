@@ -35,6 +35,9 @@
                  [commons-codec "1.17.1"]
 
                  ; Intermine Assets
+                 ;; lein cannot use git dependencies, so it stays on the last Clojars release at the
+                 ;; time of writing; deps.edn pins imcljs 1.7.0-SNAPSHOT by git sha until 1.7.0 is
+                 ;; released.
                  [org.intermine/imcljs "1.4.3"]]
 
   :deploy-repositories {"clojars" {:sign-releases false}}
