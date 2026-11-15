@@ -24,7 +24,12 @@
         org.apache.commons/commons-compress {:mvn/version "1.27.1"}
 
         ;; InterMine assets
-        org.intermine/imcljs {:mvn/version "1.4.3"}}
+        ;; Git dependency until imcljs 1.7.0 is on Clojars (the last release there is 1.6.0);
+        ;; then switch back to {:mvn/version "1.7.0"}. project.clj (lein) cannot use git
+        ;; dependencies and stays on the last Clojars release. tools.build leaves git
+        ;; dependencies out of the pom, so a SNAPSHOT jar built now does not name imcljs.
+        org.intermine/imcljs {:git/url "https://github.com/gmicklem/imcljs.git"
+                              :git/sha "98c0f103bbb87812c8f948c7d7478ad349298957"}} ; 1.7.0-SNAPSHOT
 
  :aliases
  {;; clojure -M:test
