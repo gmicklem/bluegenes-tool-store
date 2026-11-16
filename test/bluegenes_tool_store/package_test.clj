@@ -78,3 +78,116 @@
     (pkg/uninstall-package config target "some-tool")
     (is (= {:tools {}} (edn/read-string (slurp config))))
     (is (not (.exists tool)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Path containment / name validation ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(deftest inside-dir-test
+  (let [dir   (temp-dir)
+        tools (io/file dir "tools")]
+    (.mkdirs tools)
+    (.mkdirs (io/file dir "tools-evil"))
+    (testing "children and nested paths are inside, even if they do not exist yet"
+      (is (pkg/inside-dir? tools (io/file tools "a")))
+      (is (pkg/inside-dir? tools (io/file tools "@scope/name/dist/bundle.js"))))
+    (testing "the root itself is not inside"
+      (is (not (pkg/inside-dir? tools tools)))
+      (is (not (pkg/inside-dir? tools (io/file tools "a/.."))))
+      (is (not (pkg/inside-dir? tools (io/file tools ".")))))
+    (testing "a sibling whose name starts with the root's name is outside (string-prefix bug)"
+      (is (not (pkg/inside-dir? tools (io/file dir "tools-evil")))))
+    (testing "parent directory traversal is outside"
+      (is (not (pkg/inside-dir? tools (io/file tools "../x"))))
+      (is (not (pkg/inside-dir? tools (io/file tools "a/../../x"))))
+      (is (not (pkg/inside-dir? tools dir))))
+    (testing "unrelated absolute paths are outside"
+      (is (not (pkg/inside-dir? tools (io/file "/etc/passwd"))))
+      (is (not (pkg/inside-dir? tools (io/file "/")))))
+    (testing "a symlink inside root that points outside is outside"
+      (Files/createSymbolicLink (.toPath (io/file tools "link"))
+                                (.toPath (io/file dir "tools-evil"))
+                                (make-array FileAttribute 0))
+      (is (not (pkg/inside-dir? tools (io/file tools "link"))))
+      (is (not (pkg/inside-dir? tools (io/file tools "link/x")))))))
+
+(deftest package-name-validation-test
+  (testing "valid names"
+    (doseq [n ["some-tool" "@intermine/bluegenes-protvista" "a" "a.b_c-d" "@s/n" "tool2"
+               (apply str (repeat 214 "a"))]]
+      (is (nil? (pkg/package-name-error n)) n)
+      (is (pkg/valid-package-name? n))))
+  (testing "invalid names"
+    (doseq [n ["../x" "x/../y" "/etc/passwd" "-flag" "--registry=http://evil" "@scope/.." "@scope/../x"
+               "@../x" "@scope/-x" "@scope" "@scope/" "@/name" "@a/b/c" "a/b" "Upper" "@Scope/name"
+               ".hidden" "_private" "@scope/.hidden" "@scope/_x" "a..b" "" " " "a b" "a\nb" "a\\b"
+               "tools.edn" "@intermine/../../x"
+               (apply str (repeat 215 "a")) nil 42 {:a 1} ["a"]]]
+      (is (some? (pkg/package-name-error n)) (pr-str n))
+      (is (not (pkg/valid-package-name? n))))))
+
+(deftest package-dir-for-test
+  (let [dir (temp-dir)]
+    (is (= (io/file dir "@scope/name") (pkg/package-dir-for dir "@scope/name")))
+    (is (= (io/file dir "name") (pkg/package-dir-for dir "name")))
+    (doseq [n ["../x" "@scope/.." ".." "/abs" "tools.edn"]]
+      (is (thrown? clojure.lang.ExceptionInfo (pkg/package-dir-for dir n)) n))))
+
+(deftest delete-dir-test
+  (let [dir     (temp-dir)
+        tools   (io/file dir "tools")
+        evil    (io/file dir "tools-evil")
+        outside (io/file dir "outside")]
+    (.mkdirs tools)
+    (.mkdirs (io/file evil "sub"))
+    (spit (io/file evil "sub/keep.txt") "keep")
+    (.mkdirs outside)
+    (spit (io/file outside "keep.txt") "keep")
+    (spit (io/file tools "tools.edn") "{}")
+    (testing "a sibling with a common name prefix is not deleted"
+      (#'pkg/delete-dir tools evil)
+      (is (.exists (io/file evil "sub/keep.txt"))))
+    (testing "the root itself and its parent are not deleted"
+      (#'pkg/delete-dir tools tools)
+      (#'pkg/delete-dir tools dir)
+      (is (.exists (io/file tools "tools.edn")))
+      (is (.exists outside)))
+    (testing "files (not directories) are not deleted"
+      (#'pkg/delete-dir tools (io/file tools "tools.edn"))
+      (is (.exists (io/file tools "tools.edn"))))
+    (testing "a package directory is deleted, and symlinks inside are removed but not followed"
+      (let [pkg-dir (io/file tools "@scope/name")]
+        (.mkdirs (io/file pkg-dir "dist"))
+        (spit (io/file pkg-dir "dist/bundle.js") "x")
+        (Files/createSymbolicLink (.toPath (io/file pkg-dir "link")) (.toPath outside)
+                                  (make-array FileAttribute 0))
+        (#'pkg/delete-dir tools pkg-dir)
+        (is (not (.exists pkg-dir)))
+        (is (.exists (io/file outside "keep.txt")))))
+    (testing "a package directory that is a symlink out of the tools dir is not deleted"
+      (Files/createSymbolicLink (.toPath (io/file tools "linked")) (.toPath outside)
+                                (make-array FileAttribute 0))
+      (#'pkg/delete-dir tools (io/file tools "linked"))
+      (is (.exists (io/file outside "keep.txt"))))))
+
+(deftest unsafe-names-never-touch-filesystem-test
+  (let [dir     (temp-dir)
+        config  (io/file dir "tools.edn")
+        target  (io/file dir "tools")
+        victim  (io/file dir "victim")]
+    (.mkdirs target)
+    (.mkdirs victim)
+    (spit (io/file victim "keep.txt") "keep")
+    (spit config (pr-str {:tools {}}))
+    (testing "uninstall refuses traversal names and leaves the config alone"
+      (is (thrown? clojure.lang.ExceptionInfo (pkg/uninstall-package config target "../victim")))
+      (is (thrown? clojure.lang.ExceptionInfo (pkg/uninstall-package config target "@scope/../../victim")))
+      (is (.exists (io/file victim "keep.txt")))
+      (is (= {:tools {}} (edn/read-string (slurp config)))))
+    (testing "install refuses before any network access"
+      (with-redefs [clj-http.client/get (fn [& _] (throw (ex-info "network used" {})))]
+        (doseq [n ["../victim" "-flag" "@scope/.."]]
+          (let [e (try (pkg/install-package config target n) nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+            (is (some? e))
+            (is (pkg/invalid-package-name? e) n)))))))
