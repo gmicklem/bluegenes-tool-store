@@ -31,6 +31,38 @@
       (with-redefs [tools/tools-path dir]
         (is (nil? (tools/parse-tool "missing")))))))
 
+;; The BlueGenes tools page and `suitable-tools` read `:depends` and `:widgets`
+;; from a tool's `:config`; the README's config.json reference relies on every
+;; key reaching them.
+(deftest parse-tool-passes-config-keys-through-test
+  (let [dir  (temp-dir)
+        tool (io/file dir "@intermine" "bluegenes-needy-tool")
+        cfg  {:toolName {:human "Needy tool" :cljs "needyTool"}
+              :version 2
+              :accepts ["ids"]
+              :classes ["Gene"]
+              :depends ["Interaction" "GOAnnotation"]
+              :widgets ["go_enrichment_for_gene"]
+              :threshold 50
+              :jbrowseUrl "https://example.org/?data="}]
+    (io/make-parents (io/file tool "dist" "bundle.js"))
+    (spit (io/file tool "dist" "bundle.js") "")
+    (spit (io/file tool "package.json")
+          (cheshire/generate-string {:name "@intermine/bluegenes-needy-tool" :version "2.0.1"}))
+    (spit (io/file tool "config.json") (cheshire/generate-string cfg))
+    (with-redefs [tools/tools-path dir]
+      (let [parsed (tools/parse-tool "@intermine/bluegenes-needy-tool")]
+        (is (= cfg (:config parsed)) "the whole config.json is returned, nothing is filtered")
+        (is (= ["Interaction" "GOAnnotation"] (get-in parsed [:config :depends])))
+        (is (= ["go_enrichment_for_gene"] (get-in parsed [:config :widgets])))
+        (testing "the API response carries the keys too"
+          (with-redefs [tools/installed-tools-list (constantly ["@intermine/bluegenes-needy-tool"])]
+            (let [res  (tools/get-all-tools)
+                  tool (first (get-in res [:body :tools]))]
+              (is (= 200 (:status res)))
+              (is (= ["go_enrichment_for_gene"] (get-in tool [:config :widgets])))
+              (is (= ["Interaction" "GOAnnotation"] (get-in tool [:config :depends]))))))))))
+
 (deftest installed-tools-list-test
   (let [dir (temp-dir)
         cfg (io/file dir "tools.edn")]

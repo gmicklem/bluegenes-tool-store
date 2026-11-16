@@ -52,6 +52,31 @@ clojure -M -m bluegenes-tool-store.tools help
 
 If *bluegenes-tool-store* is used as a dependency in a different project, run the same command from that project's Clojure CLI setup. In a leiningen project you can instead add `"tools" ["run" "-m" "bluegenes-tool-store.tools"]` to the `:aliases` map in your *project.clj* and run `lein tools help` (this repository's *project.clj* already has the alias).
 
+## Writing a tool: package layout and `config.json` reference
+
+A tool is an npm package with the keyword `bluegenes-intermine-tool`, published under the `@intermine` scope. The tool store installs the latest version and, for each tool, reads three files from the package:
+
+* `package.json`: the tool store keeps `name`, `version`, `description`, `license`, `homepage` and `author`.
+* `config.json`: BlueGenes' own configuration of the tool (below).
+* `dist/bundle.js`: the code BlueGenes loads (a warning is logged if it is missing). An optional `preview.png` in the package root is shown on the tools page.
+
+`GET /api/tools/all` returns, for every installed tool, `{:names {:human :cljs :npm}, :config <the whole config.json>, :package {...}, :hasimage ...}`. The tool store does not filter `config.json`: every key you put in it, including keys of your own, reaches BlueGenes as `:config`. BlueGenes reads these keys:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `toolName` | `{"human": "...", "cljs": "..."}` | The name shown to people and the global JavaScript variable the bundle defines (it must be a valid JS identifier and unique among tools). Required. |
+| `version` | number | The BlueGenes tool API version the tool was written for (currently `2`). Tools with another version are not shown. Defaults to `1` when missing, so always set it. |
+| `accepts` | list of `"id"` / `"ids"` | Whether the tool takes a single object (report page) or a list. |
+| `classes` | list of class names | The data types the tool is shown for, e.g. `["Gene", "Protein"]`; `["*"]` means any. Subclasses match. |
+| `depends` | list of class names | Classes the mine's data model must have for the tool to work, e.g. `["AtlasExpression"]`. BlueGenes hides the tool on mines whose model lacks any of them. |
+| `widgets` | list of widget names | Widgets (names as listed by the mine's `/service/widgets`, e.g. `["go_enrichment_for_gene"]`) the tool requests from the mine's web service. BlueGenes hides the tool on mines that lack any of them. Declare these when the tool calls a widget or enrichment endpoint. |
+| `threshold` | number | Largest list the tool is shown for before BlueGenes asks the user to expand it (default 1000). |
+| `description` | string | Text shown on the tools page and above the tool; falls back to the package description. |
+| `files` | `{"js": "dist/bundle.js", "css": "dist/style.css"}` | Where the bundle and its stylesheet are, relative to the package. |
+| `columnMapping` | `{"Gene": {"id": "primaryIdentifier"}, ...}` | Which field identifies an object of each class. |
+
+If your tool queries a mine for something that not every mine has (a class such as `Interaction` through `Gene.interactions`, or a widget), declare it in `depends` or `widgets` rather than letting the request fail at run time. Any other key (for example a `jbrowseUrl`) is passed to BlueGenes untouched and is available to the tool.
+
 ## Note on using OpenJDK 9
 
 If you use OpenJDK 9, you will need to add the `java9` profile to your leiningen task. You can do this by adding `with-profile +java9` to your command, like the following:
