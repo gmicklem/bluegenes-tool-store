@@ -5,7 +5,8 @@
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [bluegenes-tool-store.package :as pkg])
-  (:import [java.nio.file Files]
+  (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
+           [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [java.util.zip GZIPOutputStream]
            [org.apache.commons.compress.archivers.tar TarArchiveEntry TarArchiveOutputStream]))
@@ -25,15 +26,39 @@
       (.write tar bytes)
       (.closeArchiveEntry tar))))
 
+;; The registry is never contacted: `fetch-tarball!` is replaced by a copy of
+;; a local file, and the package data carries the digests a registry would.
+
+(defn- hex [^bytes bs] (apply str (map #(format "%02x" (bit-and % 0xff)) bs)))
+
+(defn- sha1-hex [file]
+  (hex (.digest (java.security.MessageDigest/getInstance "SHA-1") (Files/readAllBytes (.toPath (io/file file))))))
+
+(defn- sri [algo jca ^bytes content]
+  (str algo "-" (.encodeToString (java.util.Base64/getEncoder)
+                                 (.digest (java.security.MessageDigest/getInstance jca) content))))
+
+(defn- package-for
+  "Package data as `get-package-tgz` would return it for `tgz`."
+  [tgz name]
+  {:uri (str "https://registry.npmjs.org/" name "/-/pkg-1.0.0.tgz")
+   :name name :version "1.0.0"
+   :integrity (sri "sha512" "SHA-512" (Files/readAllBytes (.toPath (io/file tgz))))
+   :shasum (sha1-hex tgz)})
+
+(defn- download [package target tgz]
+  (with-redefs [pkg/fetch-tarball! (fn [_ dest] (io/copy (io/file tgz) (io/file dest)))]
+    (#'pkg/download-package-tgz package target)))
+
 (deftest download-package-tgz-test
   (let [dir     (temp-dir)
         tgz     (io/file dir "pkg.tgz")
         target  (io/file dir "tools")
-        package {:uri (str (.toURI tgz)) :name "@scope/some-tool" :version "1.0.0"}]
-    (write-tgz! tgz {"package/package.json"  "{\"name\":\"@scope/some-tool\"}"
-                     "package/dist/bundle.js" "console.log('hi');"})
+        _       (write-tgz! tgz {"package/package.json"  "{\"name\":\"@scope/some-tool\"}"
+                                 "package/dist/bundle.js" "console.log('hi');"})
+        package (package-for tgz "@scope/some-tool")]
     (testing "extracts entries and strips the leading package/ directory"
-      (is (= package (#'pkg/download-package-tgz package target)))
+      (is (= package (download package target tgz)))
       (is (= "console.log('hi');"
              (slurp (io/file target "@scope/some-tool" "dist" "bundle.js"))))
       (is (.exists (io/file target "@scope/some-tool" "package.json"))))))
@@ -44,10 +69,10 @@
       (let [dir     (temp-dir)
             tgz     (io/file dir "pkg.tgz")
             target  (io/file dir "tools")
-            package {:uri (str (.toURI tgz)) :name "some-tool" :version "1.0.0"}]
-        (write-tgz! tgz {"package/package.json" "{}"
-                         bad                    "pwned"})
-        (let [e (try (#'pkg/download-package-tgz package target)
+            _       (write-tgz! tgz {"package/package.json" "{}"
+                                     bad                    "pwned"})
+            package (package-for tgz "some-tool")]
+        (let [e (try (download package target tgz)
                      nil
                      (catch clojure.lang.ExceptionInfo e e))]
           (is (some? e))
@@ -191,3 +216,141 @@
                        (catch clojure.lang.ExceptionInfo e e))]
             (is (some? e))
             (is (pkg/invalid-package-name? e) n)))))))
+
+(deftest tarball-url-error-test
+  (testing "https URLs on the registry host are accepted"
+    (is (nil? (pkg/tarball-url-error "https://registry.npmjs.org/@intermine/bluegenes-protvista/-/bluegenes-protvista-1.0.0.tgz")))
+    (is (nil? (pkg/tarball-url-error "https://registry.npmjs.org:443/x/-/x-1.0.0.tgz")))
+    (is (nil? (pkg/tarball-url-error "HTTPS://Registry.NPMJS.org/x/-/x-1.0.0.tgz")))
+    (is (pkg/valid-tarball-url? "https://registry.npmjs.org/x/-/x-1.0.0.tgz")))
+  (testing "everything else is rejected with a message"
+    (doseq [url ["http://registry.npmjs.org/x/-/x-1.0.0.tgz"
+                 "file:///etc/passwd"
+                 "file://registry.npmjs.org/x.tgz"
+                 "ftp://registry.npmjs.org/x.tgz"
+                 "https://evil.example.com/x-1.0.0.tgz"
+                 "https://registry.npmjs.org.evil.example.com/x.tgz"
+                 "https://evil.example.com/registry.npmjs.org/x.tgz"
+                 "https://registry.npmjs.org@evil.example.com/x.tgz"
+                 "https://user:pw@registry.npmjs.org/x.tgz"
+                 "https://registry.npmjs.org:8443/x.tgz"
+                 "registry.npmjs.org/x/-/x-1.0.0.tgz"
+                 "//registry.npmjs.org/x.tgz"
+                 "/x/-/x-1.0.0.tgz"
+                 "https://registry.npmjs.org/with space.tgz"
+                 ""
+                 nil
+                 42]]
+      (is (string? (pkg/tarball-url-error url)) (pr-str url))
+      (is (not (pkg/valid-tarball-url? url)) (pr-str url)))))
+
+(deftest integrity-test
+  (let [content (.getBytes "hello tarball" "UTF-8")
+        other   (.getBytes "hello tampered tarball" "UTF-8")
+        sha1    (hex (.digest (java.security.MessageDigest/getInstance "SHA-1") content))]
+    (testing "sha512 SRI"
+      (let [dist {:integrity (sri "sha512" "SHA-512" content)}]
+        (is (= "sha512" (pkg/verify-integrity! dist content)))
+        (let [e (try (pkg/verify-integrity! dist other) nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (= :mismatch (:bluegenes-tool-store.package/integrity-error (ex-data e)))))))
+    (testing "sha1 shasum, upper or lower case"
+      (is (= "sha1" (pkg/verify-integrity! {:shasum sha1} content)))
+      (is (= "sha1" (pkg/verify-integrity! {:shasum (.toUpperCase ^String sha1)} content)))
+      (is (thrown? clojure.lang.ExceptionInfo (pkg/verify-integrity! {:shasum sha1} other))))
+    (testing "integrity wins over shasum, the strongest SRI algorithm is used"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (pkg/verify-integrity! {:integrity (sri "sha512" "SHA-512" other) :shasum sha1} content)))
+      (is (= "sha512" (pkg/verify-integrity!
+                        {:integrity (str (sri "sha256" "SHA-256" other) " " (sri "sha512" "SHA-512" content))}
+                        content))))
+    (testing "a wrong digest is rejected for a different content length too"
+      (is (thrown? clojure.lang.ExceptionInfo (pkg/verify-integrity! {:shasum (apply str (repeat 40 "0"))} content))))
+    (testing "no usable digest is a refusal, not a pass"
+      (doseq [dist [{} {:integrity "" :shasum nil} {:integrity "md5-AAAA"} {:integrity "sha512-!!!"} {:shasum "abc"}]]
+        (let [e (try (pkg/verify-integrity! dist content) nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (= :missing (:bluegenes-tool-store.package/integrity-error (ex-data e))) (pr-str dist)))))
+    (testing "files are digested as well"
+      (let [f (io/file (temp-dir) "c.bin")]
+        (io/copy content f)
+        (is (= "sha512" (pkg/verify-integrity! {:integrity (sri "sha512" "SHA-512" content)} f)))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (pkg/verify-integrity! {:integrity (sri "sha512" "SHA-512" other)} f)))))))
+
+(deftest size-guard-test
+  (testing "copy-bounded! copies up to the limit"
+    (let [out (ByteArrayOutputStream.)]
+      (is (= 100000 (pkg/copy-bounded! (ByteArrayInputStream. (byte-array 100000)) out 100000 "download")))
+      (is (= 100000 (.size out)))))
+  (testing "copy-bounded! stops once the limit is exceeded"
+    (let [out (ByteArrayOutputStream.)
+          e   (try (pkg/copy-bounded! (ByteArrayInputStream. (byte-array 100001)) out 100000 "download") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (= "download" (:bluegenes-tool-store.package/limit-exceeded (ex-data e))))
+      (is (<= (.size out) 100000))))
+  (testing "Content-Length is checked up front"
+    (is (= 10 (pkg/check-content-length! "10" 10 "download")))
+    (is (nil? (pkg/check-content-length! nil 10 "download")))
+    (is (nil? (pkg/check-content-length! "garbage" 10 "download")))
+    (is (thrown? clojure.lang.ExceptionInfo (pkg/check-content-length! "11" 10 "download")))
+    (is (thrown? clojure.lang.ExceptionInfo (pkg/check-content-length! 11 10 "download"))))
+  (testing "the download limit is 50 MB"
+    (is (= (* 50 1024 1024) pkg/max-download-bytes))))
+
+(deftest download-package-tgz-refusals-test
+  (let [dir    (temp-dir)
+        tgz    (io/file dir "pkg.tgz")
+        target (io/file dir "tools")
+        _      (write-tgz! tgz {"package/package.json" "{}" "package/a.js" "1"})
+        good   (package-for tgz "some-tool")
+        fetched (atom 0)
+        run    (fn [package]
+                 (with-redefs [pkg/fetch-tarball! (fn [_ dest] (swap! fetched inc) (io/copy tgz (io/file dest)))]
+                   (try (#'pkg/download-package-tgz package target) nil
+                        (catch clojure.lang.ExceptionInfo e e))))]
+    (testing "a bad URL is refused before anything is fetched"
+      (doseq [u [(str (.toURI tgz)) "http://registry.npmjs.org/x.tgz" "https://evil.example.com/x.tgz"]]
+        (let [e (run (assoc good :uri u))]
+          (is (some? (:bluegenes-tool-store.package/bad-tarball-url (ex-data e))) u)))
+      (is (zero? @fetched))
+      (is (not (.exists (io/file target "some-tool")))))
+    (testing "an integrity mismatch refuses, extracts nothing and keeps an installed version"
+      (.mkdirs (io/file target "some-tool"))
+      (spit (io/file target "some-tool" "old.txt") "old")
+      (let [e (run (assoc good :integrity (sri "sha512" "SHA-512" (.getBytes "other" "UTF-8")) :shasum nil))]
+        (is (= :mismatch (:bluegenes-tool-store.package/integrity-error (ex-data e)))))
+      (is (= "old" (slurp (io/file target "some-tool" "old.txt"))))
+      (is (not (.exists (io/file target "some-tool" "package.json")))))
+    (testing "a package without digests is refused"
+      (is (= :missing (:bluegenes-tool-store.package/integrity-error
+                        (ex-data (run (dissoc good :integrity :shasum)))))))
+    (testing "a matching shasum alone is enough"
+      (is (nil? (run (dissoc good :integrity))))
+      (is (.exists (io/file target "some-tool" "package.json"))))))
+
+(deftest extraction-limits-test
+  (let [dir    (temp-dir)
+        tgz    (io/file dir "pkg.tgz")
+        target (io/file dir "tools")
+        _      (write-tgz! tgz {"package/a.txt" "aaaa" "package/b.txt" "bbbb" "package/c.txt" "cccc"})
+        pkg-data (package-for tgz "some-tool")
+        run    (fn []
+                 (try (download pkg-data target tgz) nil
+                      (catch clojure.lang.ExceptionInfo e e)))]
+    (testing "too many entries"
+      (with-redefs [pkg/max-extracted-entries 2]
+        (let [e (run)]
+          (is (= "entries" (:bluegenes-tool-store.package/limit-exceeded (ex-data e)))))
+        (is (not (.exists (io/file target "some-tool"))) "partial extraction is cleaned up")))
+    (testing "too many extracted bytes"
+      (with-redefs [pkg/max-extracted-bytes 10]
+        (let [e (run)]
+          (is (= "extracted size" (:bluegenes-tool-store.package/limit-exceeded (ex-data e)))))
+        (is (not (.exists (io/file target "some-tool"))) "partial extraction is cleaned up")))
+    (testing "exactly at the limits is fine"
+      (with-redefs [pkg/max-extracted-bytes 12 pkg/max-extracted-entries 3]
+        (is (nil? (run)))
+        (is (= "cccc" (slurp (io/file target "some-tool" "c.txt"))))))))
