@@ -47,10 +47,10 @@ Note: The tools CLI doesn't give very user-friendly feedback, and is only meant 
 If you still wish to use the tools CLI, run the following command for a usage guide.
 
 ```
-lein tools help
+clojure -M -m bluegenes-tool-store.tools help
 ```
 
-If *bluegenes-tool-store* is used as a dependency in a different leiningen project, you can still use the tools CLI by adding `"tools" ["run" "-m" "bluegenes-tool-store.tools"]` to the `:alises` map in your *project.clj*.
+If *bluegenes-tool-store* is used as a dependency in a different project, run the same command from that project's Clojure CLI setup. In a leiningen project you can instead add `"tools" ["run" "-m" "bluegenes-tool-store.tools"]` to the `:aliases` map in your *project.clj* and run `lein tools help` (this repository's *project.clj* already has the alias).
 
 ## Note on using OpenJDK 9
 

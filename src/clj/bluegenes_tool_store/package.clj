@@ -133,6 +133,14 @@
   so this is the one host it can legitimately point to."
   "registry.npmjs.org")
 
+;; The registry sits behind Cloudflare, which sets a `__cf_bm` cookie using the
+;; `Partitioned` attribute. clj-http's default cookie spec does not know it and
+;; logs "Invalid cookie header" on every request. We never use cookies, so the
+;; standard (RFC 6265) policy is enough to make the warning go away.
+(def http-opts
+  "Options added to every request to the npm registry."
+  {:cookie-policy :standard})
+
 (def max-download-bytes
   "Upper bound for the size of a downloaded (compressed) tarball: 50 MB."
   (* 50 1024 1024))
@@ -289,11 +297,12 @@
   "Downloads `url` (an https registry URL, already validated) to `dest`, never
   following redirects and never writing more than `max-download-bytes`."
   [url dest]
-  (let [res (client/get url {:as :stream
+  (let [res (client/get url (merge http-opts
+                            {:as :stream
                              :redirect-strategy :none
                              :throw-exceptions false
                              :socket-timeout 60000
-                             :connection-timeout 15000})]
+                             :connection-timeout 15000}))]
     (try
       (when-not (= 200 (:status res))
         (throw (ex-info (format "Unexpected HTTP status %s from `%s`." (:status res) url)
@@ -389,8 +398,7 @@
   (let [registry-url (str "https://" registry-host "/" package-name)
         {:keys [latest-tag dist]}
         (try
-          (let [res (-> registry-url
-                        client/get
+          (let [res (-> (client/get registry-url http-opts)
                         :body
                         (cheshire/parse-string true))
                 latest-tag (get-in res [:dist-tags :latest])]

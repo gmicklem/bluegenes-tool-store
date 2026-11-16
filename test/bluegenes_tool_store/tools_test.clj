@@ -129,6 +129,22 @@
     (is (thrown? Exception (tools/parse-npm-search "{\"results\":[]}")))
     (is (thrown? Exception (tools/parse-npm-search "{\"objects\":[{\"package\":{}}]}")))))
 
+(deftest registry-requests-use-standard-cookie-policy-test
+  (testing "the search request asks for the standard cookie policy (no `Invalid cookie header` warnings)"
+    (let [opts (atom nil)]
+      (with-redefs [clj-http.client/get (fn [_ o] (reset! opts o) {:status 200 :body npm-search-fixture})]
+        (tools/get-all-npm-tools)
+        (is (= :standard (:cookie-policy @opts))))))
+  (testing "the package metadata and tarball requests do too"
+    (let [opts (atom [])]
+      (with-redefs [clj-http.client/get (fn [_ o] (swap! opts conj o)
+                                          {:status 200 :body "{}" :headers {}})]
+        (try (#'pkg/get-package-tgz "some-tool") (catch Exception _))
+        (try (#'pkg/fetch-tarball! "https://registry.npmjs.org/x.tgz" (java.io.File/createTempFile "cookie-test" ".tgz"))
+             (catch Exception _))
+        (is (= 2 (count @opts)))
+        (is (every? #(= :standard (:cookie-policy %)) @opts))))))
+
 (deftest get-all-npm-tools-test
   (testing "queries the npm registry and returns parsed results"
     (let [url (atom nil)]
