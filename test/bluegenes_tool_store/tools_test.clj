@@ -3,7 +3,9 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [cheshire.core :as cheshire]
+            [bluegenes-tool-store.auth :as auth]
             [bluegenes-tool-store.core :as core]
+            [bluegenes-tool-store.package :as pkg]
             [bluegenes-tool-store.tools :as tools])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -41,6 +43,41 @@
     (let [res (core/handler {:request-method :get :uri "/api/tools/path" :headers {}})]
       (is (= 200 (:status res))))))
 
+(deftest package-endpoints-reject-bad-names-test
+  (let [ops (atom [])]
+    (with-redefs [auth/check-priv (fn [handler req] (handler req))
+                  pkg/install-package   (fn [& args] (swap! ops conj [:install args]) nil)
+                  pkg/uninstall-package (fn [& args] (swap! ops conj [:uninstall args]) nil)]
+      (doseq [uri ["/api/tools/install" "/api/tools/uninstall" "/api/tools/update"]
+              bad ["../x" "-flag" "@scope/.." "/etc/passwd" "Upper" (apply str (repeat 215 "a"))
+                   ["@intermine/ok" "../x"] 42 nil]]
+        (testing (str uri " rejects " (pr-str bad))
+          (let [res (core/handler {:request-method :post :uri uri :headers {}
+                                   :body-params {:package bad}})]
+            (is (= 400 (:status res)))
+            (is (re-find #"error" (let [b (:body res)] (if (map? b) (pr-str b) (slurp b)))))))
+        (testing (str uri " rejects packages " (pr-str bad))
+          (is (= 400 (:status (core/handler {:request-method :post :uri uri :headers {}
+                                             :body-params {:packages bad}}))))))
+      (is (empty? @ops) "nothing was installed or uninstalled")
+      (testing "the missing parameter case is still a 400"
+        (is (= 400 (:status (core/handler {:request-method :post :uri "/api/tools/install"
+                                           :headers {} :body-params {}})))))))
+  (testing "package-operation itself refuses invalid names without touching the filesystem"
+    (with-redefs [pkg/install-package (fn [& _] (throw (ex-info "should not run" {})))]
+      (is (= 400 (:status (tools/package-operation :install "../x"))))
+      (is (= 400 (:status (tools/package-operation :uninstall ["ok" "@s/.."])))))))
+
+(deftest parse-tool-rejects-unsafe-names-test
+  (let [dir (temp-dir)]
+    ;; Valid tool files one level above the tools dir: reachable only via "..".
+    (spit (io/file dir "config.json") "{\"toolName\":{\"human\":\"x\"}}")
+    (spit (io/file dir "package.json") "{\"name\":\"x\"}")
+    (.mkdirs (io/file dir "tools"))
+    (with-redefs [tools/tools-path (io/file dir "tools")]
+      (is (nil? (tools/parse-tool "..")))
+      (is (nil? (tools/parse-tool "../"))))))
+
 (deftest parse-port-test
   (testing "config.core parses numeric env vars to Long, which must still work"
     (is (= 5057 (core/parse-port {:server-port 5057})))
@@ -67,6 +104,15 @@
      :total 4 :time "2026-11-15T00:00:00.000Z"}))
 
 (deftest parse-npm-search-test
+  (testing "official-prefix names that are not valid npm names are dropped"
+    (is (= ["@intermine/ok"]
+           (map (comp :name :package)
+                (tools/parse-npm-search
+                  (cheshire/generate-string
+                    {:objects [{:package {:name "@intermine/ok"}}
+                               {:package {:name "@intermine/../../x"}}
+                               {:package {:name "@intermine/-flag"}}
+                               {:package {:name "@intermine/UPPER"}}]}))))))
   (let [results (tools/parse-npm-search npm-search-fixture)]
     (testing "official packages are kept with name, version and description"
       (is (= ["@intermine/bluegenes-protvista" "@intermine/bluegenes-msa-viewer"]
