@@ -32,14 +32,18 @@
 (defn parse-npm-search
   "Parse the body of an NPM registry search response into a vector of results,
   each a map with a `:package` (`:name`, `:version`, `:description`, ...).
-  Only official (`@intermine/`) packages are kept. Throws on a malformed body."
+  Only official (`@intermine/`) packages with a valid npm name are kept. Throws on a malformed body."
   [body]
   (let [objects (:objects (cheshire/parse-string body true))]
     (when-not (sequential? objects)
       (throw (ex-info "NPM search response has no `objects` list." {:body-start (some-> body (subs 0 (min 200 (count body))))})))
     (when-not (every? #(string? (get-in % [:package :name])) objects)
       (throw (ex-info "NPM search response contains an entry without a package name." {})))
-    (filterv #(string/starts-with? (get-in % [:package :name]) official-scope-prefix) objects)))
+    (filterv #(let [n (get-in % [:package :name])]
+                (and (string/starts-with? n official-scope-prefix)
+                     ;; The prefix alone admits `@intermine/../../x`.
+                     (pkg/valid-package-name? n)))
+             objects)))
 
 (defn get-all-npm-tools
   "Send an HTTP request to the NPM registry search API to get a list of
@@ -100,6 +104,8 @@
   - dist/bundle.js"
   [tool-name]
   (try
+    (when-let [msg (pkg/package-name-error tool-name)]
+      (throw (ex-info msg {:tool-name tool-name})))
     (let [path (io/file tools-path tool-name)
           ;; this is the bluegenes-specific config.
           bluegenes-config-path (io/file path "config.json")
@@ -138,6 +144,17 @@
     {:tools (remove nil? ; Faulty tools will return nil.
                     (map parse-tool (installed-tools-list)))}))
 
+(defn package-names-error
+  "Returns a message if `package+` (a package name or a sequential collection
+  of names) contains anything that is not an acceptable npm package name, else
+  nil. Nothing touches the filesystem before this check."
+  [package+]
+  (cond
+    (string? package+)     (pkg/package-name-error package+)
+    (sequential? package+)
+    (some pkg/package-name-error package+)
+    :else "Please include your package name(s) as a string or a list of strings."))
+
 (let [lock       (ReentrantLock.)
       install    (partial pkg/install-package   tools-config tools-path)
       uninstall  (partial pkg/uninstall-package tools-config tools-path)]
@@ -147,7 +164,9 @@
     response if a different package-operation is already in progress.
     On success it will return a response with the new tool list."
     [operation package+]
-    (if (.tryLock lock)
+    (if-let [msg (package-names-error package+)]
+      (response/bad-request {:error msg})
+      (if (.tryLock lock)
       (try
         (case operation
           :install (if (coll? package+)
@@ -161,10 +180,12 @@
         (tools-list-res)
         (catch Exception e
           (error e)
-          (response/bad-gateway {:error (.getMessage e)}))
+          (if (pkg/invalid-package-name? e)
+            (response/bad-request {:error (.getMessage e)})
+            (response/bad-gateway {:error (.getMessage e)})))
         (finally
           (.unlock lock)))
-      (response/service-unavailable {:error "A tool operation is already in progress. Please try again later."}))))
+      (response/service-unavailable {:error "A tool operation is already in progress. Please try again later."})))))
 
 (defn verify-package-params
   "Helper to wrap API functions to check for validity of package parameters."
@@ -172,7 +193,9 @@
   (fn [{:keys [params] :as req}]
     (if (or (contains? params :package)
             (contains? params :packages))
-      (f req)
+      (if-let [msg (package-names-error (or (:package params) (:packages params)))]
+        (response/bad-request {:error msg})
+        (f req))
       (response/bad-request {:error "Please include your package name(s) in the package or packages parameter."}))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;
