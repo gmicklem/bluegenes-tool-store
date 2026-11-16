@@ -50,7 +50,7 @@
   bluegenes tools. On any failure, logs an error and returns an empty list."
   []
   (try
-    (let [{:keys [status body]} (client/get npm-search-url {:throw-exceptions false})]
+    (let [{:keys [status body]} (client/get npm-search-url (assoc pkg/http-opts :throw-exceptions false))]
       (when-not (= 200 status)
         (throw (ex-info (format "unexpected HTTP status %s" status) {:status status})))
       (parse-npm-search body))
@@ -235,8 +235,9 @@
 ;;;;;;;;;;;;;;;
 
 (defn -main
-  "This main function is for managing tools from the command line via the
-  leiningen `lein tools` alias."
+  "This main function is for managing tools from the command line:
+  `clojure -M -m bluegenes-tool-store.tools` (or `lein tools`, an alias for
+  the same thing in project.clj)."
   [cmd & args]
   (timbre/set-level! :info)
   (case cmd
@@ -245,9 +246,9 @@
     "uninstall" (package-operation :uninstall args)
     (println "Install BlueGenes tools from the command line.
 
-USAGE: lein tools [ARGS...]
+USAGE: clojure -M -m bluegenes-tool-store.tools COMMAND [ARGS...]
 
-ARGS:
+COMMAND:
 init                            - Initialise tools config and install all official tools
 install package [package ...]   - Install one or more tools
 uninstall package [package ...] - Uninstall one or more tools")))
