@@ -1,0 +1,140 @@
+# Continuous integration for bluegenes-tool-store. It gates Renovate's dependency pull
+# requests and runs the same steps as the local gate script (scripts/gate-tool-store.sh
+# in the intermine-planning repo): the unit tests, the library jar, and a smoke start of
+# the server. The repository has no cljfmt configuration and no npm build, so there is
+# no format or npm step.
+name: CI
+
+on:
+  push:
+    branches: [maint-2026, 'maint/**']
+    paths-ignore: ['**/*.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request supersedes a running build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # bash -eo pipefail, so `cmd | tee log` fails when cmd fails
+
+env:
+  # Where the steps tee their output; uploaded as an artifact when the job fails.
+  CI_LOG_DIR: ci-logs
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The Clojure CLI comes from the official installer on the Clojure core team's
+      # release page (same as BlueGenes' CI), checked against a pinned sha256. To
+      # upgrade: pick a release of https://github.com/clojure/brew-install, copy the
+      # sha256 of its linux-install.sh (the asset's digest) here.
+      - name: Install the Clojure CLI
+        env:
+          CLOJURE_VERSION: "1.12.6.1673"
+          INSTALLER_SHA256: "5ae63b082ed33bf4c29bf1a8317c5c15249d1bc753676b2f5177fb3804ad6f77"
+        run: |
+          dir=$(mktemp -d)
+          curl -fsSL --retry 5 --retry-connrefused -o "$dir/linux-install.sh" \
+            "https://github.com/clojure/brew-install/releases/download/${CLOJURE_VERSION}/linux-install.sh"
+          echo "${INSTALLER_SHA256}  $dir/linux-install.sh" | sha256sum -c -
+          (cd "$dir" && bash linux-install.sh --prefix "$HOME/.local/clojure")
+          echo "$HOME/.local/clojure/bin" >> "$GITHUB_PATH"
+          rm -rf "$dir"
+
+      # ~/.gitlibs holds the git dependencies (imcljs, the cognitect test runner).
+      - name: Cache Maven and gitlibs
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: clj-deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            clj-deps-${{ runner.os }}-
+
+      - name: Tool versions and log directory
+        run: |
+          java -version
+          clojure --version
+          mkdir -p "$CI_LOG_DIR"
+
+      # A cognitect test-runner summary is required, so a run that finds no
+      # tests cannot pass.
+      - name: Unit tests (clojure -M:test)
+        run: |
+          clojure -M:test 2>&1 | tee "$CI_LOG_DIR/test.log"
+          sed 's/\x1b\[[0-9;]*m//g' "$CI_LOG_DIR/test.log" > "$CI_LOG_DIR/test.plain.log"
+          grep -E '^Ran [0-9]+ tests containing [0-9]+ assertions' "$CI_LOG_DIR/test.plain.log"
+          grep -E '^0 failures, 0 errors' "$CI_LOG_DIR/test.plain.log"
+
+      - name: Library jar (clojure -T:build jar)
+        run: |
+          clojure -T:build jar 2>&1 | tee "$CI_LOG_DIR/jar.log"
+          jar=$(ls target/bluegenes-tool-store-*.jar | head -1)
+          test -f "$jar"
+          unzip -Z1 "$jar" > "$CI_LOG_DIR/jar-contents.txt"
+          pom=$(unzip -p "$jar" META-INF/maven/org.intermine/bluegenes-tool-store/pom.xml)
+          problems=""
+          for f in bluegenes_tool_store/core.clj bluegenes_tool_store/tools.clj bluegenes_tool_store/package.clj bluegenes_tool_store/auth.clj config.edn; do
+            grep -qx "$f" "$CI_LOG_DIR/jar-contents.txt" || problems="$problems missing:$f"
+          done
+          grep -q '\.class$' "$CI_LOG_DIR/jar-contents.txt" && problems="$problems contains-.class(AOT)"
+          grep -Eq '^(test/|bluegenes_tool_store/.*_test\.clj)' "$CI_LOG_DIR/jar-contents.txt" && problems="$problems contains-tests"
+          echo "$pom" | grep -q '<groupId>org.intermine</groupId>' || problems="$problems pom-groupId"
+          echo "$pom" | grep -q '<artifactId>bluegenes-tool-store</artifactId>' || problems="$problems pom-artifactId"
+          echo "$pom" | grep -q -- '-SNAPSHOT</version>' || problems="$problems pom-version-not-SNAPSHOT"
+          if [ -n "$problems" ]; then echo "jar problems:$problems"; exit 1; fi
+          echo "$jar ok: $(grep -vc '/$' "$CI_LOG_DIR/jar-contents.txt") files"
+
+      # Starts the server from source with a scratch config (a tools directory that
+      # already has a tools.edn, so no npm install is attempted) and checks that the
+      # two read-only endpoints answer 200. The port is a string in the config file:
+      # core.clj does (Integer/parseInt (:server-port env)), and yogthos/config turns a
+      # numeric SERVER_PORT environment variable into a Long, which throws.
+      - name: Smoke start
+        run: |
+          port=5056
+          smoke=$(mktemp -d)
+          mkdir -p "$smoke/tools"
+          echo '{:tools {}}' > "$smoke/tools/tools.edn"
+          printf '{:server-port "%s" :bluegenes-tool-path "%s" :bluegenes-default-service-root "http://localhost:1/none"}\n' "$port" "$smoke/tools" > "$smoke/config.edn"
+          ( exec clojure -J-Dconfig="$smoke/config.edn" -M -m bluegenes-tool-store.core ) > "$CI_LOG_DIR/smoke-server.log" 2>&1 &
+          spid=$!
+          for _ in $(seq 1 120); do
+            curl -s -o /dev/null -m 2 "http://localhost:$port/api/tools/path" && break
+            kill -0 $spid 2>/dev/null || break
+            sleep 1
+          done
+          c_path=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://localhost:$port/api/tools/path" || true)
+          c_all=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://localhost:$port/api/tools/all" || true)
+          pkill -P $spid || true
+          kill $spid || true
+          echo "/api/tools/path=$c_path /api/tools/all=$c_all"
+          test "$c_path" = 200
+          test "$c_all" = 200
+
+      - name: Upload logs (failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-logs
+          path: ${{ env.CI_LOG_DIR }}/
+          retention-days: 7
+          if-no-files-found: ignore
